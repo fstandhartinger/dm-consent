@@ -16,7 +16,7 @@ import psycopg
 
 KEY = os.environ['CONSENT_HMAC_KEY'].encode()
 assert len(KEY) >= 32, 'CONSENT_HMAC_KEY too short'
-MAIL_VERSION = 'mail-v2-20261106'
+MAIL_VERSION = 'mail-v2/v3-20261106'
 REVENUE_DB = os.environ['REVENUE_DB_URL']   # role may only INSERT/SELECT(few cols) node_provider_eligibility
 CLICKS_DB = os.environ['CLICKS_DB_URL']     # own database, audit log of every request
 PROVIDER, TIERS = 'gpuserverhub', ['eu', 'global']
@@ -80,8 +80,8 @@ TEXT = {
         'pending': 'Recording your consent …',
         'ok_h': 'Thank you, your consent is recorded',
         'ok': ('Decision Models may now also serve the API requests of your account from our EU GPU servers in Katowice, '
-               'Poland (GPU Server Hub). Nothing else changes: the same data rules apply, request and response content is '
-               'not stored, and your keys, prices and limits stay the same.'),
+               'Poland (GPU Server Hub). Nothing else changes: the same data rules apply as on our other servers, and your '
+               'keys, prices and limits stay the same.'),
         'already': 'Your consent was already recorded. Nothing else to do.',
         'inactive': 'We have your click. Because of an earlier choice on your account, nothing changes yet: we will contact you by email before anything changes.',
         'proof': 'As proof we record the time, IP address and browser of this confirmation.',
@@ -102,8 +102,8 @@ TEXT = {
         'pending': 'Ihre Zustimmung wird gespeichert …',
         'ok_h': 'Danke, Ihre Zustimmung ist gespeichert',
         'ok': ('Decision Models darf die API-Anfragen Ihres Kontos ab jetzt auch auf unseren EU-GPU-Servern in Katowice, '
-               'Polen (GPU Server Hub) verarbeiten. Sonst ändert sich nichts: Es gelten dieselben Datenregeln, Inhalte von '
-               'Anfragen und Antworten werden nicht gespeichert, Ihre Schlüssel, Preise und Limits bleiben gleich.'),
+               'Polen (GPU Server Hub) verarbeiten. Sonst ändert sich nichts: Es gelten dieselben Datenregeln wie auf unseren '
+               'anderen Servern, und Ihre Schlüssel, Preise und Limits bleiben gleich.'),
         'already': 'Ihre Zustimmung war bereits gespeichert. Sie müssen nichts weiter tun.',
         'inactive': 'Wir haben Ihren Klick erhalten. Wegen einer früheren Entscheidung zu Ihrem Konto ändert sich noch nichts: Wir melden uns per E-Mail, bevor sich etwas ändert.',
         'proof': 'Als Nachweis speichern wir Zeitpunkt, IP-Adresse und Browser dieser Bestätigung.',
