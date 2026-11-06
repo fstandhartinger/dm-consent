@@ -15,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psycopg
 
 KEY = os.environ['CONSENT_HMAC_KEY'].encode()
+assert len(KEY) >= 32, 'CONSENT_HMAC_KEY too short'
+MAIL_VERSION = 'mail-v2-20261106'
 REVENUE_DB = os.environ['REVENUE_DB_URL']   # role may only INSERT/SELECT(few cols) node_provider_eligibility
 CLICKS_DB = os.environ['CLICKS_DB_URL']     # own database, audit log of every request
 PROVIDER, TIERS = 'gpuserverhub', ['eu', 'global']
@@ -37,25 +39,30 @@ def verify(tok):
     return acct, tid
 
 
-def connect(url):
-    return psycopg.connect(url, connect_timeout=5, prepare_threshold=None, autocommit=True)
+def connect(url, timeout=5):
+    return psycopg.connect(url, connect_timeout=timeout, prepare_threshold=None, autocommit=True,
+                           options='-c statement_timeout=5000')
 
 
-def log_click(method, tid, acct, ip, ua, result, lang):
+def log_click(method, tid, acct, ip, ua, result, lang, signals=''):
     try:
-        with connect(CLICKS_DB) as c:
-            c.execute('INSERT INTO clicks (method, tid, account_id, ip, ua, result, lang) VALUES (%s,%s,%s,%s,%s,%s,%s)',
-                      (method, tid, acct, ip, ua, result, lang))
+        with connect(CLICKS_DB, timeout=2) as c:
+            c.execute('INSERT INTO clicks (method, tid, account_id, ip, ua, result, lang, signals) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)',
+                      (method, tid, acct, ip, ua, result, lang, signals))
     except Exception as e:  # the audit log must never block the consent itself
         print('click log failed:', type(e).__name__, flush=True)
 
 
-def record(acct, tid, ip, ua):
-    """Returns 'recorded', 'already' or 'inactive' (a withdrawn row exists: left for a human)."""
+def record(acct, tid, ip, ua, signals):
+    """Returns 'recorded', 'already' or 'inactive' (a withdrawn consent or an active objection exists: left for a human)."""
     now = datetime.now(timezone.utc)
-    evidence = (f'one-click consent link (consent.decisionmodels.io, katowice-consent-oneclick-20261106) tid={tid} '
-                f'clicked={now.isoformat(timespec="seconds")} ip={ip} ua={ua[:200]}')
+    evidence = (f'one-click consent link (consent.decisionmodels.io, katowice-consent-oneclick-20261106, {MAIL_VERSION}) '
+                f'tid={tid} clicked={now.isoformat(timespec="seconds")} ip={ip} signals={signals[:80]} ua={ua[:200]}')
     with connect(REVENUE_DB) as c:
+        # An active objection beats any consent in the gateway: never claim "recorded" then.
+        if c.execute("SELECT 1 FROM node_provider_eligibility WHERE account_id=%s AND provider=%s AND kind='objection' AND active",
+                     (acct, PROVIDER)).fetchone():
+            return 'inactive'
         row = c.execute(
             'INSERT INTO node_provider_eligibility (account_id, provider, kind, tiers, eligible_from, active, evidence) '
             "VALUES (%s, %s, 'consent', %s, now(), true, %s) ON CONFLICT (account_id, provider, kind) DO NOTHING "
@@ -76,7 +83,8 @@ TEXT = {
                'Poland (GPU Server Hub). Nothing else changes: the same data rules apply, request and response content is '
                'not stored, and your keys, prices and limits stay the same.'),
         'already': 'Your consent was already recorded. Nothing else to do.',
-        'inactive': 'Thank you, we received your consent and will confirm it by email.',
+        'inactive': 'We have your click. Because of an earlier choice on your account, nothing changes yet: we will contact you by email before anything changes.',
+        'proof': 'As proof we record the time, IP address and browser of this confirmation.',
         'withdraw': ('You can withdraw this at any time: reply to our email or write to '
                      '<a href="mailto:info@decisionmodels.io">info@decisionmodels.io</a>. Your right to object to the '
                      'sub-processor is not affected. Details: <a href="https://decisionmodels.io/legal/subprocessors">'
@@ -97,7 +105,8 @@ TEXT = {
                'Polen (GPU Server Hub) verarbeiten. Sonst ändert sich nichts: Es gelten dieselben Datenregeln, Inhalte von '
                'Anfragen und Antworten werden nicht gespeichert, Ihre Schlüssel, Preise und Limits bleiben gleich.'),
         'already': 'Ihre Zustimmung war bereits gespeichert. Sie müssen nichts weiter tun.',
-        'inactive': 'Danke, wir haben Ihre Zustimmung erhalten und bestätigen sie per E-Mail.',
+        'inactive': 'Wir haben Ihren Klick erhalten. Wegen einer früheren Entscheidung zu Ihrem Konto ändert sich noch nichts: Wir melden uns per E-Mail, bevor sich etwas ändert.',
+        'proof': 'Als Nachweis speichern wir Zeitpunkt, IP-Adresse und Browser dieser Bestätigung.',
         'withdraw': ('Sie können das jederzeit widerrufen: Antworten Sie einfach auf unsere E-Mail oder schreiben Sie an '
                      '<a href="mailto:info@decisionmodels.io">info@decisionmodels.io</a>. Ihr Widerspruchsrecht gegen den '
                      'Unterauftragsverarbeiter bleibt unberührt. Details: <a href="https://decisionmodels.io/legal/subprocessors">'
@@ -121,10 +130,11 @@ CSS = ('body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-seri
 
 def result_html(t, result, at):
     if result in ('recorded', 'already', 'inactive'):
-        lead = t['ok'] if result != 'inactive' else t['inactive']
+        if result == 'inactive':
+            return f'<h1>{t["title"]}</h1><p>{t["inactive"]}</p>'
         extra = f'<p>{t["already"]}</p>' if result == 'already' else ''
-        stamp = f'<p class="small">{at}</p>' if result == 'recorded' else ''
-        return f'<h1>{t["ok_h"]}</h1><p>{lead}</p>{extra}{stamp}<p class="small">{t["withdraw"]}</p>'
+        stamp = f'<p class="small">{at}. {t["proof"]}</p>' if result == 'recorded' else ''
+        return f'<h1>{t["ok_h"]}</h1><p>{t["ok"]}</p>{extra}{stamp}<p class="small">{t["withdraw"]}</p>'
     if result in ('invalid', 'expired'):
         return f'<h1>{t["bad_h"]}</h1><p>{t["bad"]}</p>'
     return f'<h1>{t["err_h"]}</h1><p>{t["err"]}</p>'
@@ -151,6 +161,7 @@ def limited(ip):
 
 
 class H(BaseHTTPRequestHandler):
+    timeout = 10
     server_version = 'dm-consent'
     sys_version = ''
 
@@ -199,27 +210,38 @@ class H(BaseHTTPRequestHandler):
         action = html.escape(self.path, quote=True)
         inner = (f'<p id="p">{t["pending"]}</p><noscript><p>{t["noscript"]}</p>'
                  f'<form method="post" action="{action}"><button type="submit">{t["button"]}</button></form></noscript>')
-        script = ('<script>fetch(location.pathname+location.search,{method:"POST",headers:{"X-Consent":"1"}})'
-                  '.then(function(r){return r.json()}).then(function(j){document.getElementById("r").innerHTML=j.html})'
-                  '.catch(function(){document.getElementById("p").innerHTML=' + json.dumps(t['err']) + '})</script>')
+        form = (f'<form method="post" action="{action}"><button type="submit">{t["button"]}</button></form>')
+        script = ('<script>(function(){var t0=Date.now(),done=false,R=document.getElementById("r");'
+                  'function go(why){if(done)return;done=true;'
+                  'fetch(location.pathname+location.search,{method:"POST",headers:{"X-Consent":"1","X-Signals":why+";ms="+(Date.now()-t0)}})'
+                  '.then(function(r){return r.json()}).then(function(j){R.innerHTML=j.html||' + json.dumps(f'<p>{t["err"]}</p>') + '})'
+                  '.catch(function(){R.innerHTML=' + json.dumps(f'<p>{t["err"]}</p>') + '})}'
+                  'if(navigator.webdriver){R.innerHTML=' + json.dumps(f'<p>{t["noscript"]}</p>' + form) + ';return}'
+                  '["pointerdown","pointermove","touchstart","keydown","scroll","wheel"].forEach(function(e){'
+                  'addEventListener(e,function(ev){if(ev.isTrusted)go("event:"+e)},{passive:true,once:true})});'
+                  'setTimeout(function(){if(document.visibilityState==="visible")go("timer")},800)})()</script>')
         self._send(200, page(t, lang, inner, script))
 
     def do_POST(self):
         path, lang, t, ip, ua = self._ctx()
         is_js = self.headers.get('X-Consent') == '1'
+        signals = ('js:' + (self.headers.get('X-Signals') or '')[:60]) if is_js else 'form'
         if not path.startswith('/k/') or limited(ip):
-            return self._send(404, '{}', 'application/json')
+            inner = result_html(t, 'error', '')
+            if is_js:
+                return self._send(429, json.dumps({'result': 'error', 'html': inner}), 'application/json')
+            return self._send(429, page(t, lang, inner))
         v = verify(path[3:])
         if not isinstance(v, tuple):
             result = v or 'invalid'
             log_click('POST', None, None, ip, ua, result, lang)
         else:
             try:
-                result = record(v[0], v[1], ip, ua)
+                result = record(v[0], v[1], ip, ua, signals)
             except Exception as e:
                 print('record failed:', type(e).__name__, flush=True)
                 result = 'error'
-            log_click('POST-js' if is_js else 'POST-form', v[1], v[0], ip, ua, result, lang)
+            log_click('POST-js' if is_js else 'POST-form', v[1], v[0], ip, ua, result, lang, signals)
         at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
         inner = result_html(t, result, at)
         code = 500 if result == 'error' else 200
@@ -234,6 +256,7 @@ def init_db():
             with connect(CLICKS_DB) as c:
                 c.execute('CREATE TABLE IF NOT EXISTS clicks (id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT now(), '
                           'method text, tid text, account_id text, ip text, ua text, result text, lang text)')
+                c.execute('ALTER TABLE clicks ADD COLUMN IF NOT EXISTS signals text')
             return
         except Exception as e:
             print('init_db retry:', type(e).__name__, flush=True)
