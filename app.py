@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import psycopg
+import logkit
 
 KEY = os.environ['CONSENT_HMAC_KEY'].encode()
 assert len(KEY) >= 32, 'CONSENT_HMAC_KEY too short'
@@ -160,7 +161,13 @@ def limited(ip):
         return _hits[k] > 30
 
 
-class H(BaseHTTPRequestHandler):
+class H(logkit.HTTPLogMixin, BaseHTTPRequestHandler):
+    # Structured access lines (logging standard, AGENTS.md): consent tokens live in the path, so /k/<token> is masked;
+    # no IPs or user agents.
+    logkit_ip = False
+    logkit_ua = False
+    logkit_path_mask = staticmethod(lambda p: re.sub(r'^/k/[^/]+', '/k/:token', p))
+
     timeout = 10
     server_version = 'dm-consent'
     sys_version = ''
@@ -265,4 +272,5 @@ def init_db():
 
 if __name__ == '__main__':
     init_db()
+    logkit.setup(app='dm-consent')
     ThreadingHTTPServer(('0.0.0.0', int(os.environ.get('PORT', '8080'))), H).serve_forever()
